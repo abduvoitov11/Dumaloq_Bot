@@ -7,7 +7,7 @@ import asyncio
 from flask import Flask
 import threading
 
-# Flask server
+# Flask server (UptimeRobot uchun)
 app = Flask(__name__)
 
 @app.route('/health')
@@ -91,7 +91,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = users.get(user_id, "en")
     await update.message.reply_text(f"📹 {LANGUAGES[lang]['send_video']}")
 
-# Video qayta ishlash
+# Video qayta ishlash + video note sifatida yuborish (faqat mobil)
 async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str):
     video_file = await update.message.video.get_file()
     input_path = f"{update.effective_user.id}_input.mp4"
@@ -102,9 +102,9 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, lang
 
         clip = VideoFileClip(input_path)
         
-        # 10 daqiqaga cheklash (600 soniya)
-        if clip.duration > 600:
-            clip = clip.subclip(0, 600)
+        # 60 soniyaga cheklash
+        if clip.duration > 60:
+            clip = clip.subclip(0, 60)
 
         # Kvadrat formatga keltirish (markazdan kesish)
         w, h = clip.size
@@ -120,9 +120,9 @@ async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, lang
         clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
         clip.close()
 
-        # Yuborish
+        # Video note sifatida yuborish (faqat mobil uchun)
         with open(output_path, "rb") as video:
-            await update.message.reply_video(video=video, supports_streaming=True)
+            await update.message.reply_video_note(video=video)
 
     except Exception as e:
         await update.message.reply_text(f"❌ Xatolik: {str(e)}")
@@ -138,7 +138,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Asosiy dastur
 def main():
-    application = Application.builder().token("8313385612:AAFnjk6xyV6a_4l9OSf9MFm5WZjsguWyY5E").build()
+    application = Application.builder().token("BOTNING_TOKENI").build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("language", set_language))
