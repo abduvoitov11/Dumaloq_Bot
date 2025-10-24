@@ -1,95 +1,162 @@
-from flask import Flask, request, jsonify
-from moviepy.editor import VideoFileClip
-import telebot
+import json
 import os
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from moviepy.editor import VideoFileClip
+import asyncio
+from flask import Flask
+import threading
 
-# ---------------- Telegram Bot ----------------
-TOKEN = "YOUR_BOT_TOKEN"
-bot = telebot.TeleBot(TOKEN)
-
-# Foydalanuvchi tillarini saqlash
-user_languages = {}
-
-# ---------------- Flask App ----------------
+# Flask server
 app = Flask(__name__)
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Til tanlash va video yuborish uchun endpoint
-@app.route("/bot", methods=["POST"])
-def telegram_webhook():
-    update = request.get_json()
-    chat_id = None
+@app.route('/health')
+def health():
+    return "OK", 200
+
+# Til sozlamalari
+LANGUAGES = {
+    "en": {
+        "choose_lang": "Choose language:",
+        "processing": "Processing your video...",
+        "send_video": "Send me a video!"
+    },
+    "ru": {
+        "choose_lang": "Выберите язык:",
+        "processing": "Обработка видео...",
+        "send_video": "Отправьте мне видео!"
+    },
+    "uz": {
+        "choose_lang": "Tilni tanlang:",
+        "processing": "Videoni qayta ishlash...",
+        "send_video": "Menga video yuboring!"
+    }
+}
+
+# JSON faylni yuklash/saqlash
+USERS_FILE = "users.json"
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users, f)
+
+# Tilni o'rnatish (komanda orqali)
+async def set_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    users = load_users()
+    lang_code = context.args[0] if context.args else None
+    if lang_code in LANGUAGES:
+        users[user_id] = lang_code
+        save_users(users)
+        await update.message.reply_text(f"✅ Language set to {lang_code.upper()}")
+    else:
+        keyboard = [["🇺🇸 English", "🇷🇺 Русский", "🇺🇿 O'zbek"]]
+        reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+        await update.message.reply_text("🌐 Choose your language:", reply_markup=reply_markup)
+
+# Asosiy xabarlar uchun handler
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_id = str(update.effective_user.id)
+    users = load_users()
+
+    lang_map = {
+        "🇺🇸 English": "en",
+        "🇷🇺 Русский": "ru",
+        "🇺🇿 O'zbek": "uz"
+    }
+
+    # Til tanlash tugmalari
+    if text in lang_map:
+        users[user_id] = lang_map[text]
+        save_users(users)
+        lang = lang_map[text]
+        await update.message.reply_text(LANGUAGES[lang]["send_video"])
+        return
+
+    # Agar video yuborilgan bo'lsa
+    if update.message.video:
+        lang = users.get(user_id, "en")
+        await update.message.reply_text(LANGUAGES[lang]["processing"])
+        await process_video(update, context, lang)
+        return
+
+    # Agar hech narsa yuborilmagan — faqat video so'raymiz
+    lang = users.get(user_id, "en")
+    await update.message.reply_text(f"📹 {LANGUAGES[lang]['send_video']}")
+
+# Video qayta ishlash
+async def process_video(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str):
+    video_file = await update.message.video.get_file()
+    input_path = f"{update.effective_user.id}_input.mp4"
+    output_path = f"{update.effective_user.id}_output.mp4"
+
     try:
-        if "message" in update:
-            message = update["message"]
-            chat_id = message["chat"]["id"]
+        await video_file.download_to_drive(input_path)
 
-            # /start komandasi
-            if "text" in message and message["text"] == "/start":
-                markup = {
-                    "keyboard": [["English", "Русский", "O'zbek"]],
-                    "resize_keyboard": True,
-                    "one_time_keyboard": True
-                }
-                bot.send_message(chat_id, "Choose your language / Выберите язык / Tilni tanlang:", reply_markup=markup)
-                return jsonify({"status": "ok"})
+        clip = VideoFileClip(input_path)
+        
+        # 10 daqiqaga cheklash (600 soniya)
+        if clip.duration > 600:
+            clip = clip.subclip(0, 600)
 
-            # Tilni tanlash
-            if "text" in message and message["text"] in ["English", "Русский", "O'zbek"]:
-                user_languages[chat_id] = message["text"]
-                lang = message["text"]
-                if lang == "English":
-                    bot.send_message(chat_id, "Great! Now send me a video and I will make it round.")
-                elif lang == "Русский":
-                    bot.send_message(chat_id, "Отлично! Теперь пришлите видео, и я сделаю его круглым.")
-                else:
-                    bot.send_message(chat_id, "Ajoyib! Endi menga video yuboring, men uni dumaloq qilaman.")
-                return jsonify({"status": "ok"})
+        # Kvadrat formatga keltirish (markazdan kesish)
+        w, h = clip.size
+        size = min(w, h)
+        clip = clip.crop(
+            x_center=w/2,
+            y_center=h/2,
+            width=size,
+            height=size
+        )
 
-            # Video qabul qilish
-            if "video" in message or "document" in message:
-                file_id = message.get("video", message.get("document"))["file_id"]
-                file_info = bot.get_file(file_id)
-                downloaded_file = bot.download_file(file_info.file_path)
-                
-                input_path = os.path.join(UPLOAD_FOLDER, f"{chat_id}_input.mp4")
-                output_path = os.path.join(UPLOAD_FOLDER, f"{chat_id}_output.mp4")
-                
-                with open(input_path, "wb") as f:
-                    f.write(downloaded_file)
+        # Natijani saqlash
+        clip.write_videofile(output_path, codec="libx264", audio_codec="aac")
+        clip.close()
 
-                # Dumaloq video yaratish (professional maska)
-                try:
-                    clip = VideoFileClip(input_path)
-                    size = min(clip.w, clip.h)
-                    clip_resized = clip.resize(height=size) if clip.h > clip.w else clip.resize(width=size)
-                    clip_resized = clip_resized.crop(x_center=clip_resized.w/2, y_center=clip_resized.h/2, width=size, height=size)
-                    
-                    # professional silliq dumaloq maska
-                    clip_resized = clip_resized.fx(lambda c: c)  # agar keyin effektlar qo‘shilsa
-                    clip_resized.write_videofile(output_path, codec="libx264", audio_codec="aac")
-                    
-                    with open(output_path, "rb") as f:
-                        bot.send_video(chat_id, f)
-                    
-                    os.remove(input_path)
-                    os.remove(output_path)
-                except Exception as e:
-                    lang = user_languages.get(chat_id, "English")
-                    if lang == "English":
-                        bot.send_message(chat_id, f"Error processing video: {e}")
-                    elif lang == "Русский":
-                        bot.send_message(chat_id, f"Ошибка обработки видео: {e}")
-                    else:
-                        bot.send_message(chat_id, f"Video bilan ishlashda xatolik: {e}")
+        # Yuborish
+        with open(output_path, "rb") as video:
+            await update.message.reply_video(video=video, supports_streaming=True)
 
-        return jsonify({"status": "ok"})
     except Exception as e:
-        if chat_id:
-            bot.send_message(chat_id, f"Unexpected error: {e}")
-        return jsonify({"status": "error", "error": str(e)})
+        await update.message.reply_text(f"❌ Xatolik: {str(e)}")
+    finally:
+        # Fayllarni tozalash
+        for f in [input_path, output_path]:
+            if os.path.exists(f):
+                os.remove(f)
 
-# ---------------- Flask run ----------------
+# Start komandasi
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await set_language(update, context)
+
+# Asosiy dastur
+def main():
+    application = Application.builder().token("8313385612:AAFnjk6xyV6a_4l9OSf9MFm5WZjsguWyY5E").build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("language", set_language))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_message))
+
+    print("✅ Bot ishga tushdi. /start buyrug'ini yuboring.")
+    application.run_polling()
+
+# Flask serverni alohida threadda ishga tushirish
+def start_flask():
+    app.run(host='0.0.0.0', port=8080, threaded=True)
+
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    # Flask serverni alohida threadda ishga tushirish
+    flask_thread = threading.Thread(target=start_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # Botni ishga tushirish
+    main()
