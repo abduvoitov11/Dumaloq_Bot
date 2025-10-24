@@ -1,7 +1,7 @@
 # Python 3.10 asosida
 FROM python:3.10-slim
 
-# ffmpeg o'rnatish
+# ffmpeg o'rnatish (video qayta ishlash uchun)
 RUN apt-get update && \
     apt-get install -y ffmpeg && \
     rm -rf /var/lib/apt/lists/*
